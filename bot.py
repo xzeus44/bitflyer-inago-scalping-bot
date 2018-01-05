@@ -14,6 +14,9 @@ import signal
 
 # Constants and system
 VOLUME_TARGET_BITFLYER_ONLY = True
+VOLUME_TRIGGER = 10
+CUT_TRIGGER = 0
+WAIT_AND_SEE_MODE_TRIGGER = 5
 
 class Position(Enum):
     NONE = 0
@@ -27,23 +30,22 @@ keys = json.load(open('bitflyer_keys.json', 'r'))
 api = pybitflyer.API(api_key=keys['api-key'], api_secret=keys['api-secret'])
 
 # InagoFlyer scraping initialization
-inago_url = "https://inagoflyer.appspot.com/btcmac"
+INAGO_URL = "https://inagoflyer.appspot.com/btcmac"
 driver = None
 
 # Variables
-cur_pos_type = Position.NONE
+cur_pos_side = Position.NONE
 cur_pos_size = 0
 balance = 0
 sum_profit = 0
-# max_loss_cnt = 3
 loss_cnt = 0
-was_trigger = 5
 
 def initScraper():
     global driver
+
     print('* Starting Selenium Webdriver on PhantomJS... ', flush=True)
     driver = webdriver.PhantomJS()
-    driver.get(inago_url)
+    driver.get(INAGO_URL)
 
     if VOLUME_TARGET_BITFLYER_ONLY:
         print('* Volume target set to bitflyer-fx only.', flush=True)
@@ -151,11 +153,9 @@ def order(params, is_entry):
     return True
 
 def close(pos, size):
-    global balance
-    global cur_pos_type
-
     text_color = Fore.GREEN if pos == Position.LONG else Fore.RED
     print(text_color + '-------------------- ' + pos.name + ' CLOSE' + ' --------------------')
+    print('* ' + datetime.now().strftime("%Y/%m/%d %H:%M:%S"))
 
     params = {
         'product_code': 'FX_BTC_JPY',
@@ -176,7 +176,8 @@ def entry(pos, size):
 
     text_color = Fore.GREEN if pos == Position.LONG else Fore.RED
     print(text_color + '-------------------- ' + pos.name + ' ENTRY' + ' --------------------')
-    if (loss_cnt >= was_trigger):
+    print('* ' + datetime.now().strftime("%Y/%m/%d %H:%M:%S"))
+    if (loss_cnt >= WAIT_AND_SEE_MODE_TRIGGER):
         print('* ' + Fore.CYAN + 'WAIT-AND-SEE MODE')
 
     params = {
@@ -197,7 +198,7 @@ def getOrderAmountByPercentage(percentage, cur_price):
     global balance
     global loss_cnt
 
-    if loss_cnt >= was_trigger:
+    if loss_cnt >= WAIT_AND_SEE_MODE_TRIGGER:
         amount = 0.001
     else:
         amount = balance * (percentage / 100) * 14.95 / cur_price
@@ -205,13 +206,7 @@ def getOrderAmountByPercentage(percentage, cur_price):
     return round(amount, 8)
 
 def controller():
-    global cur_pos_type
-    global cur_pos_size
-    global balance
-
-    # Parameters
-    volume_trigger = 12
-    cut_trigger = 0
+    global cur_pos_side, cur_pos_size, balance
 
     buyvol, sellvol = getInagoVolume()
 
@@ -222,34 +217,34 @@ def controller():
     print("* buy volume: {:>6.2f} , sell volume: {:>6.2f}".format(buyvol, sellvol))
 
     # Close
-    if cur_pos_type != Position.NONE:
+    if cur_pos_side != Position.NONE:
         is_closed = False
-        if cur_pos_type == Position.LONG and (buyvol - sellvol) <= cut_trigger:
-            cur_pos_type = close(cur_pos_type, cur_pos_size)
+        if cur_pos_side == Position.LONG and (buyvol - sellvol) <= CUT_TRIGGER:
+            cur_pos_side = close(cur_pos_side, cur_pos_size)
             is_closed = True
-        elif cur_pos_type == Position.SHORT and (sellvol - buyvol) <= cut_trigger:
-            cur_pos_type = close(cur_pos_type, cur_pos_size)
+        elif cur_pos_side == Position.SHORT and (sellvol - buyvol) <= CUT_TRIGGER:
+            cur_pos_side = close(cur_pos_side, cur_pos_size)
             is_closed = True
 
         if is_closed:
             showTradeResult()
 
     # Entry
-    if cur_pos_type == Position.NONE:
-        if (buyvol - sellvol) > volume_trigger:
+    if cur_pos_side == Position.NONE:
+        if (buyvol - sellvol) > VOLUME_TRIGGER:
             ticker = api.ticker(product_code="FX_BTC_JPY")
             cur_price = ticker['best_ask']
             order_amount = getOrderAmountByPercentage(100, cur_price)
-            cur_pos_type = entry(Position.LONG, order_amount)
-            if cur_pos_type != Position.NONE:
+            cur_pos_side = entry(Position.LONG, order_amount)
+            if cur_pos_side != Position.NONE:
                 cur_pos_size = order_amount
 
-        elif (sellvol - buyvol) > volume_trigger:
+        elif (sellvol - buyvol) > VOLUME_TRIGGER:
             ticker = api.ticker(product_code="FX_BTC_JPY")
             cur_price = ticker['best_bid']
             order_amount = getOrderAmountByPercentage(100, cur_price)
-            cur_pos_type = entry(Position.SHORT, order_amount)
-            if cur_pos_type != Position.NONE:
+            cur_pos_side = entry(Position.SHORT, order_amount)
+            if cur_pos_side != Position.NONE:
                 cur_pos_size = order_amount
 
 def showTradeResult():
@@ -267,7 +262,7 @@ def showTradeResult():
 
     profit = new_balance - balance
     if profit <= 0:
-        loss_cnt = min(loss_cnt + 1, was_trigger)
+        loss_cnt = min(loss_cnt + 1, WAIT_AND_SEE_MODE_TRIGGER)
     else:
         loss_cnt = 0
     sum_profit += profit
