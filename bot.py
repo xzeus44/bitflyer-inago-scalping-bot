@@ -14,9 +14,10 @@ import signal
 
 # Constants and system
 VOLUME_TARGET_BITFLYER_ONLY = True
-VOLUME_TRIGGER = 10
+VOLUME_TRIGGER = 12 # BF ONLY: 12, ALL: 45
 CUT_TRIGGER = 0
 WAIT_AND_SEE_MODE_TRIGGER = 5
+SCRAPER_RELOAD_INTERVAL_SEC = 30 * 60 * 60
 
 class Position(Enum):
     NONE = 0
@@ -65,6 +66,11 @@ def initScraper():
         driver.find_elements_by_id("Binance_BTCUSDT_checkbox")[0].click()
     print('* Webdriver ready!' + "\n", flush=True)
 
+def reloadScraper():
+    print('* Reloading InagoFlyer...', end='', flush=True)
+    driver.get(INAGO_URL)
+    print('Done')
+
 def getInagoVolume():
     global driver
     buyvol = 0
@@ -88,7 +94,6 @@ def isResponseError(res):
 
 def cancelAll():
     res = api.cancelallchildorders(product_code="FX_BTC_JPY")
-    print(res, flush=True)
 
 def closeAll():
     cnt = 0
@@ -109,16 +114,20 @@ def closeAll():
 
     return cnt
 
-def errorRecoveryMode(sec):
+def errorRecoveryMode(sec, do_close):
+    print('* ' + Fore.MAGENTA + 'Pausing trade for {} seconds.'.format(sec))
     t = 0
-    while t < sec:
-        cancelAll()
-        closeAll()
+    closed = False
+    while (do_close and not closed) or t < sec:
+        if do_close and not closed:
+            cancelAll()
+            if closeAll() > 0:
+                closed = True
         t += 1
         time.sleep(1)
 
 def order(params, is_entry):
-    print('* Order detail')
+    print('* Order detail:')
     print(params, flush=True)
 
     res = api.sendchildorder(**params)
@@ -126,7 +135,7 @@ def order(params, is_entry):
     print(res, flush=True)
 
     # Wait for order to be settled
-    timeout = 3
+    timeout = 30
     t = 0
     while True:
         open_positions = getAllOpenPositions()
@@ -137,8 +146,8 @@ def order(params, is_entry):
         if t >= timeout:
             print("* bitFlyer API seems heavy.")
             print('* Cancelling all orders.')
-            print('* Entering recovery mode for 30 seconds...')
-            errorRecoveryMode(30)
+            print('* Entering recovery mode...')
+            errorRecoveryMode(120, do_close=is_entry)
             return False
 
         time.sleep(0.2)
@@ -149,8 +158,9 @@ def order(params, is_entry):
         cancelAll()
         closeAll()
         return False
-
-    return True
+    else:
+        print('* Order completed!')
+        return True
 
 def close(pos, size):
     text_color = Fore.GREEN if pos == Position.LONG else Fore.RED
@@ -165,11 +175,8 @@ def close(pos, size):
         'minute_to_expire': 10000
     }
 
-    if order(params, is_entry=False):
-        print('* Order completed!')
-        return Position.NONE
-
-    return pos
+    order(params, is_entry=False)
+    return Position.NONE
 
 def entry(pos, size):
     global loss_cnt
@@ -189,9 +196,10 @@ def entry(pos, size):
     }
 
     if order(params, is_entry=True):
-        print('* Order completed!' + "\n\n")
+        print("\n")
         return pos
 
+    print("\n")
     return Position.NONE
 
 def getOrderAmountByPercentage(percentage, cur_price):
@@ -204,6 +212,35 @@ def getOrderAmountByPercentage(percentage, cur_price):
         amount = balance * (percentage / 100) * 14.95 / cur_price
 
     return round(amount, 8)
+
+def showTradeResult():
+    global sum_profit
+    global balance
+    global loss_cnt
+
+    print()
+    print('---------- TRADE RESULT ----------')
+    new_balance = 0
+
+    time.sleep(1)
+    res = api.getcollateral()
+    new_balance = float(res['collateral'])
+
+    profit = new_balance - balance
+    if profit <= 0:
+        loss_cnt = min(loss_cnt + 1, WAIT_AND_SEE_MODE_TRIGGER)
+    else:
+        loss_cnt = 0
+    sum_profit += profit
+
+    print("* New balance: {:.2f}".format(new_balance))
+    text_color = Fore.GREEN if profit > 0 else Fore.RED
+    print("* Trade profit: " + text_color + "{:+f}".format(profit))
+    text_color = Fore.GREEN if sum_profit > 0 else Fore.RED
+    print("* Sum of profit: " + text_color + "{:+f}".format(sum_profit))
+    print("* Loss count: {}".format(loss_cnt))
+    print('----------------------------------' + "\n\n")
+    balance = new_balance
 
 def controller():
     global cur_pos_side, cur_pos_size, balance
@@ -247,46 +284,15 @@ def controller():
             if cur_pos_side != Position.NONE:
                 cur_pos_size = order_amount
 
-def showTradeResult():
-    global sum_profit
-    global balance
-    global loss_cnt
-
-    print()
-    print('---------- TRADE RESULT ----------')
-    new_balance = 0
-
-    time.sleep(1)
-    res = api.getcollateral()
-    new_balance = float(res['collateral'])
-
-    profit = new_balance - balance
-    if profit <= 0:
-        loss_cnt = min(loss_cnt + 1, WAIT_AND_SEE_MODE_TRIGGER)
-    else:
-        loss_cnt = 0
-    sum_profit += profit
-
-    print("* New balance: {:.2f}".format(new_balance))
-    text_color = Fore.GREEN if profit > 0 else Fore.RED
-    print("* Trade profit: " + text_color + "{:+f}".format(profit))
-    text_color = Fore.GREEN if sum_profit > 0 else Fore.RED
-    print("* Sum of profit: " + text_color + "{:+f}".format(sum_profit))
-    print("* Loss count: {}".format(loss_cnt))
-    print('----------------------------------' + "\n\n")
-    balance = new_balance
-
-def handler(signal, frame):
-    print('SIGINT received, stopping...')
-    if driver:
-        driver.quit()
-    closeAll()
-    sys.exit(0)
-
 def main():
     global balance
+    global cur_pos_side
 
+    # Initialization
     initScraper()
+    init_time = int(time.time())
+    reload_time = SCRAPER_RELOAD_INTERVAL_SEC
+    up_time = 0
 
     # Balance check
     res = api.getcollateral()
@@ -298,7 +304,21 @@ def main():
 
     while True:
         controller()
+
+        # reload scraper every designated seconds
+        up_time = int(time.time()) - init_time
+        if up_time >= reload_time and cur_pos_side == Position.NONE:
+            reloadScraper()
+            reload_time += SCRAPER_RELOAD_INTERVAL_SEC
+
         time.sleep(1)
+
+def handler(signal, frame):
+    print('SIGINT received, stopping...')
+    if driver:
+        driver.quit()
+    closeAll()
+    sys.exit(0)
 
 if __name__ == '__main__':
     signal.signal(signal.SIGINT, handler)
