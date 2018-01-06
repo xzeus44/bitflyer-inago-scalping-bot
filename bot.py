@@ -10,21 +10,32 @@ from datetime import datetime
 import json
 import time
 import sys
+import os
 import signal
 
-# Constants and system
+# Parameters
 VOLUME_TARGET_BITFLYER_ONLY = True
-VOLUME_TRIGGER = 12 # BF ONLY: 12, ALL: 45
+VOLUME_TRIGGER = 10 # BF ONLY: 12, ALL: 45
 CUT_TRIGGER = 0
-WAIT_AND_SEE_MODE_TRIGGER = 5
-SCRAPER_RELOAD_INTERVAL_SEC = 30 * 60 * 60
+WAIT_AND_SEE_MODE_TRIGGER = 3
+FORCE_WAIT_AND_SEE_PERCENTAGE_LOSS = 4
+SCRAPER_RELOAD_INTERVAL_SEC = 10 * 60
 
+# Log file
+LOG_DIR = './log'
+PROFIT_LOG_FILE_PATH = LOG_DIR + '/profit_' + datetime.now().strftime("%Y%m%d") + '.log'
+
+# Variables
 class Position(Enum):
     NONE = 0
     LONG = 1
     SHORT = 2
 
-colorama.init(autoreset=True)
+cur_pos_side = Position.NONE
+cur_pos_size = 0
+balance = 0
+sum_profit = 0
+loss_cnt = 0
 
 # Bitflyer API initialization
 keys = json.load(open('bitflyer_keys.json', 'r'))
@@ -34,12 +45,11 @@ api = pybitflyer.API(api_key=keys['api-key'], api_secret=keys['api-secret'])
 INAGO_URL = "https://inagoflyer.appspot.com/btcmac"
 driver = None
 
-# Variables
-cur_pos_side = Position.NONE
-cur_pos_size = 0
-balance = 0
-sum_profit = 0
-loss_cnt = 0
+colorama.init(autoreset=True)
+
+if not os.path.exists(LOG_DIR):
+    os.makedirs(LOG_DIR)
+profit_log_fp = open(PROFIT_LOG_FILE_PATH, 'a')
 
 def initScraper():
     global driver
@@ -207,7 +217,7 @@ def getOrderAmountByPercentage(percentage, cur_price):
     global loss_cnt
 
     if loss_cnt >= WAIT_AND_SEE_MODE_TRIGGER:
-        amount = 0.001
+        amount = 0.003
     else:
         amount = balance * (percentage / 100) * 14.95 / cur_price
 
@@ -222,25 +232,29 @@ def showTradeResult():
     print('---------- TRADE RESULT ----------')
     new_balance = 0
 
-    time.sleep(1)
+    time.sleep(0.5)
     res = api.getcollateral()
     new_balance = float(res['collateral'])
 
     profit = new_balance - balance
     if profit <= 0:
-        loss_cnt = min(loss_cnt + 1, WAIT_AND_SEE_MODE_TRIGGER)
+        if -profit >= balance * FORCE_WAIT_AND_SEE_PERCENTAGE_LOSS / 100.0:
+            # Forcing wait-and-see mode when loss is large
+            loss_cnt = WAIT_AND_SEE_MODE_TRIGGER
+        else:
+            loss_cnt = min(loss_cnt + 1, WAIT_AND_SEE_MODE_TRIGGER)
     else:
         loss_cnt = 0
     sum_profit += profit
+    balance = new_balance
 
-    print("* New balance: {:.2f}".format(new_balance))
+    print("* New balance: {:.2f}".format(balance))
     text_color = Fore.GREEN if profit > 0 else Fore.RED
     print("* Trade profit: " + text_color + "{:+f}".format(profit))
     text_color = Fore.GREEN if sum_profit > 0 else Fore.RED
     print("* Sum of profit: " + text_color + "{:+f}".format(sum_profit))
     print("* Loss count: {}".format(loss_cnt))
     print('----------------------------------' + "\n\n")
-    balance = new_balance
 
 def controller():
     global cur_pos_side, cur_pos_size, balance
@@ -318,6 +332,7 @@ def handler(signal, frame):
     if driver:
         driver.quit()
     closeAll()
+    profit_log_fp.close()
     sys.exit(0)
 
 if __name__ == '__main__':
