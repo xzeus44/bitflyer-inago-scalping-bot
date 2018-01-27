@@ -79,7 +79,7 @@ def initScraper():
 def reloadScraper():
     print('* Reloading InagoFlyer...', end='', flush=True)
     driver.get(INAGO_URL)
-    print('Done')
+    print('Done' + "\n")
 
 def getInagoVolume():
     global driver
