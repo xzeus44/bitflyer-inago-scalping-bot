@@ -1,4 +1,4 @@
-# BitFlyer Inago Scalping Bot
+# bitFlyer Inago Scalping Bot
 
 This is an attempt to replicate [AKAGAMI's InagoScalBot](https://twitter.com/kanakagami1978/status/927877967757189120).
 It trades bitcoin automatically on bitflyer-fx.  
