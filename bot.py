@@ -17,9 +17,9 @@ import signal
 VOLUME_TARGET_BITFLYER_ONLY = True
 VOLUME_TRIGGER = 10 # BF ONLY: 12, ALL: 45
 CUT_TRIGGER = 0
-WAIT_AND_SEE_MODE_TRIGGER = 3
-FORCE_WAIT_AND_SEE_PERCENTAGE_LOSS = 4
-SCRAPER_RELOAD_INTERVAL_SEC = 10 * 60
+WAIT_AND_SEE_MODE_TRIGGER = 10
+FORCE_WAIT_AND_SEE_PERCENTAGE_LOSS = 100
+SCRAPER_RELOAD_INTERVAL_SEC = 3 * 60
 
 # Log file
 LOG_DIR = './log'
@@ -36,6 +36,7 @@ cur_pos_size = 0
 balance = 0
 sum_profit = 0
 loss_cnt = 0
+wait = True
 
 # Bitflyer API initialization
 keys = json.load(open('bitflyer_keys.json', 'r'))
@@ -95,9 +96,18 @@ def getAllOpenPositions():
     open_positions = api.getpositions(product_code="FX_BTC_JPY")
     return open_positions
 
+def getAllOpenOrders():
+    params = {
+        'product_code': 'FX_BTC_JPY',
+        'child_order_state': 'ACTIVE'
+    }
+    res = api.getchildorders(**params);
+    return res
+
 def isResponseError(res):
-    if 'Message' in res and res['Message'] == 'An error has occurred.' or \
-       'error_message' in res:
+    if ('Message' in res and res['Message'] == 'An error has occurred.') or \
+       'error_message' in res or \
+       ('status' in res and float(res['status']) < 0):
        return True
 
     return False
@@ -117,6 +127,8 @@ def closeAll():
             'minute_to_expire': 10000
         }
         res = api.sendchildorder(**params)
+        print("* Close all.")
+        print(res, flush=True)
         if isResponseError(res):
             print('*** CLOSING FAILED')
         else:
@@ -124,16 +136,19 @@ def closeAll():
 
     return cnt
 
-def errorRecoveryMode(sec, do_close):
+def errorRecovery(sec):
+    cancelAll()
+
     print('* ' + Fore.MAGENTA + 'Pausing trade for {} seconds.'.format(sec))
+    close_time = 30
     t = 0
-    closed = False
-    while (do_close and not closed) or t < sec:
-        if do_close and not closed:
-            cancelAll()
-            if closeAll() > 0:
-                closed = True
+    close_t = 0
+    while t < sec:
+        if close_time < close_t or close_t == 0:
+            closeAll()
+            close_t = 0
         t += 1
+        close_t += 1
         time.sleep(1)
 
 def order(params, is_entry):
@@ -143,6 +158,12 @@ def order(params, is_entry):
     res = api.sendchildorder(**params)
     print('* Order response:')
     print(res, flush=True)
+
+    if isResponseError(res):
+        print('* Order failed!')
+        cancelAll()
+        closeAll()
+        return False
 
     # Wait for order to be settled
     timeout = 30
@@ -154,41 +175,52 @@ def order(params, is_entry):
             break
 
         if t >= timeout:
-            print("* bitFlyer API seems heavy.")
-            print('* Cancelling all orders.')
-            print('* Entering recovery mode...')
-            errorRecoveryMode(120, do_close=is_entry)
+            open_orders = getAllOpenOrders()
+            if (len(open_orders) == 0):
+                print("* bitFlyer API seems heavy.")
+                print('* Cancelling all orders.')
+                print('* Entering recovery mode...')
+                errorRecovery(120)
+            else:
+                print('* Order could not be settled.')
+                if not is_entry:
+                    print('* Closing position with market price.')
+                    closeAll()
+                cancelAll()
             return False
 
-        time.sleep(0.2)
-        t += 0.2
+        time.sleep(0.5)
+        t += 1
 
-    if isResponseError(res):
-        print('* Order failed!')
-        cancelAll()
-        closeAll()
-        return False
-    else:
-        print('* Order completed!')
-        return True
+    print('* Order completed!')
+    return True
 
-def close(pos, size):
+def close(pos, price=-1):
+    cancelAll()
+    open_pos = getAllOpenPositions()
+    size = 0
+    for o_pos in open_pos:
+        size += o_pos['size']
+    size = round(size, 8)
+
     text_color = Fore.GREEN if pos == Position.LONG else Fore.RED
     print(text_color + '-------------------- ' + pos.name + ' CLOSE' + ' --------------------')
     print('* ' + datetime.now().strftime("%Y/%m/%d %H:%M:%S"))
 
     params = {
         'product_code': 'FX_BTC_JPY',
-        'child_order_type': 'MARKET',
+        'child_order_type': 'MARKET' if price == -1 else 'LIMIT',
         'side': 'SELL' if (pos == Position.LONG) else 'BUY',
         'size': size,
         'minute_to_expire': 10000
     }
+    if price != -1:
+        params['price'] = price
 
     order(params, is_entry=False)
     return Position.NONE
 
-def entry(pos, size):
+def entry(pos, size, price=-1):
     global loss_cnt
 
     text_color = Fore.GREEN if pos == Position.LONG else Fore.RED
@@ -199,11 +231,13 @@ def entry(pos, size):
 
     params = {
         'product_code': 'FX_BTC_JPY',
-        'child_order_type': 'MARKET',
+        'child_order_type': 'MARKET' if price == -1 else 'LIMIT',
         'side': 'BUY' if (pos == Position.LONG) else 'SELL',
         'size': size,
         'minute_to_expire': 10000
     }
+    if price != -1:
+        params['price'] = price
 
     if order(params, is_entry=True):
         print("\n")
@@ -221,7 +255,8 @@ def getOrderAmountByPercentage(percentage, cur_price):
     else:
         amount = balance * (percentage / 100) * 14.95 / cur_price
 
-    return round(amount, 8)
+    # return round(amount, 8)
+    return 0.003
 
 def showTradeResult():
     global sum_profit
@@ -257,7 +292,7 @@ def showTradeResult():
     print('----------------------------------' + "\n\n")
 
 def controller():
-    global cur_pos_side, cur_pos_size, balance
+    global cur_pos_side, cur_pos_size, balance, wait
 
     buyvol, sellvol = getInagoVolume()
 
@@ -267,26 +302,34 @@ def controller():
     print(CURSOR_UP_ONE + ERASE_LINE + CURSOR_UP_ONE)
     print("* buy volume: {:>6.2f} , sell volume: {:>6.2f}".format(buyvol, sellvol))
 
+    # if wait and abs(buyvol - sellvol) < VOLUME_TRIGGER:
+    #     wait = False
+
     # Close
     if cur_pos_side != Position.NONE:
         is_closed = False
         if cur_pos_side == Position.LONG and (buyvol - sellvol) <= CUT_TRIGGER:
-            cur_pos_side = close(cur_pos_side, cur_pos_size)
+            ticker = api.ticker(product_code="FX_BTC_JPY")
+            cur_price = ticker['best_bid']
+            cur_pos_side = close(cur_pos_side, cur_price)
             is_closed = True
         elif cur_pos_side == Position.SHORT and (sellvol - buyvol) <= CUT_TRIGGER:
-            cur_pos_side = close(cur_pos_side, cur_pos_size)
+            ticker = api.ticker(product_code="FX_BTC_JPY")
+            cur_price = ticker['best_ask']
+            cur_pos_side = close(cur_pos_side, cur_price)
             is_closed = True
 
         if is_closed:
             showTradeResult()
+            # wait = True
 
     # Entry
-    if cur_pos_side == Position.NONE:
+    if cur_pos_side == Position.NONE: # and not wait
         if (buyvol - sellvol) > VOLUME_TRIGGER:
             ticker = api.ticker(product_code="FX_BTC_JPY")
             cur_price = ticker['best_ask']
             order_amount = getOrderAmountByPercentage(100, cur_price)
-            cur_pos_side = entry(Position.LONG, order_amount)
+            cur_pos_side = entry(Position.LONG, order_amount, cur_price)
             if cur_pos_side != Position.NONE:
                 cur_pos_size = order_amount
 
@@ -294,7 +337,7 @@ def controller():
             ticker = api.ticker(product_code="FX_BTC_JPY")
             cur_price = ticker['best_bid']
             order_amount = getOrderAmountByPercentage(100, cur_price)
-            cur_pos_side = entry(Position.SHORT, order_amount)
+            cur_pos_side = entry(Position.SHORT, order_amount, cur_price)
             if cur_pos_side != Position.NONE:
                 cur_pos_size = order_amount
 
